@@ -1,12 +1,11 @@
 import { Hono } from "hono";
 
-// Define the environment bindings type
 interface Env {
   ASSETS: {
     fetch: (request: Request) => Promise<Response>;
   };
   ANALYTICS_PIPELINE: {
-    send: (data: any[]) => Promise<void>;
+    send(records: Record<string, any>[]): Promise<void>;
   };
 }
 
