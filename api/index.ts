@@ -5,6 +5,9 @@ interface Env {
   ASSETS: {
     fetch: (request: Request) => Promise<Response>;
   };
+  ANALYTICS_PIPELINE: {
+    send: (data: any[]) => Promise<void>;
+  };
 }
 
 const app = new Hono<{ Bindings: Env }>();
@@ -141,6 +144,8 @@ app.get("/collect", async (c) => {
     ip,
     raw_query_params: queryParams,
   };
+
+  await c.env.ANALYTICS_PIPELINE.send([analyticsData]);
   
   return c.json({
     success: true,
