@@ -1,8 +1,15 @@
 import { Hono } from "hono";
 
-const app = new Hono();
+// Define the environment bindings type
+interface Env {
+  ASSETS: {
+    fetch: (request: Request) => Promise<Response>;
+  };
+}
 
-function extractDeviceInfo(userAgent) {
+const app = new Hono<{ Bindings: Env }>();
+
+function extractDeviceInfo(userAgent?: string) {
   let browser = "Unknown";
   let os = "Unknown";
   let device = "Unknown";
@@ -56,42 +63,88 @@ function extractDeviceInfo(userAgent) {
   return { browser, os, device };
 }
 
+// Extract screen dimensions from the 'r' parameter (e.g., 1800x1169x30x30)
+function parseScreenDimensions(dimensionStr: string) {
+  if (!dimensionStr) return null;
+  
+  const parts = dimensionStr.split('x');
+  if (parts.length < 2) return null;
+  
+  return {
+    width: Number.parseInt(parts[0], 10) || 0,
+    height: Number.parseInt(parts[1], 10) || 0,
+    offsetX: parts.length > 2 ? (Number.parseInt(parts[2], 10) || 0) : 0,
+    offsetY: parts.length > 3 ? (Number.parseInt(parts[3], 10) || 0) : 0,
+  };
+}
+
 app.get("/collect", async (c) => {
-  // TODO: This is just boilerplate, needs to be expanded for a use case.
   const { userAgent } = c.req.header();
-  const { ip } = c.req.raw;
+  const ip = c.req.raw.headers.get("CF-Connecting-IP") || "unknown";
   const { referer } = c.req.header();
-  const { url } = c.req.raw;
-  const { path } = c.req.raw;
-  const { method } = c.req.raw;
+  const url = c.req.url;
+  const path = new URL(c.req.url).pathname;
+  
+  // Extract query parameters
+  const queryParams = c.req.query();
+  const {
+    s: siteId = "",
+    ts: timestamp = "",
+    vtag: versionTag = "",
+    r: screenDimensions = "",
+    re: viewportDimensions = "",
+    lng: language = "",
+    content_type: contentType = "",
+    library_version: libraryVersion = "",
+    app_name: appName = "",
+    app_type: appType = "",
+    user_id: userId = "",
+    // Add any other parameters you want to capture
+  } = queryParams;
 
   const { browser, os, device } = extractDeviceInfo(userAgent);
+  const parsedScreenDimensions = parseScreenDimensions(screenDimensions);
+  const parsedViewport = parseScreenDimensions(viewportDimensions);
+  const currentTimestamp = new Date().toISOString();
 
-  const timestamp = new Date().toISOString();
-
-  const data = {
-    timestamp,
-    session_id: "1234567890abcdef", // For production use a unique session ID
-    user_id: `user${Math.floor(Math.random() * 1000)}`, // For production use a unique user ID
+  const analyticsData = {
+    timestamp: currentTimestamp,
+    session_data: {
+      site_id: siteId,
+      client_timestamp: timestamp || Date.now().toString(),
+      user_id: userId || `user${Math.floor(Math.random() * 1000)}`,
+    },
     event_data: {
       event_id: Math.floor(Math.random() * 1000),
-      event_type: "test",
-      page_url: url,
-      timestamp,
+      version_tag: versionTag,
+      content_type: contentType,
+    },
+    app_data: {
+      app_name: appName,
+      app_type: appType,
+      library_version: libraryVersion,
+      language: language,
     },
     device_info: {
       browser,
       os,
       device,
       userAgent,
+      screen: parsedScreenDimensions,
+      viewport: parsedViewport,
     },
-    referrer: "NA",
+    referrer: referer || "NA",
+    page: {
+      url,
+      path,
+    },
     ip,
+    raw_query_params: queryParams,
   };
   
   return c.json({
     success: true,
-    data,
+    data: analyticsData,
   });
 });
 
