@@ -20,16 +20,16 @@ function getMidnightDate(): Date {
 
 // Get next modified date for cookieless tracking
 function getNextLastModifiedDate(current: Date | null): Date {
+  let originalCurrent = current;
   // Handle invalid date
   if (current && Number.isNaN(current.getTime())) {
-    const originalCurrent = current;
-    current = null;
+    originalCurrent = null;
   }
 
   const midnight = getMidnightDate();
 
   // Check if new day, if it is then set to midnight
-  let next = current ? current : midnight;
+  let next = originalCurrent ? originalCurrent : midnight;
   next = midnight.getTime() - next.getTime() > 0 ? midnight : next;
 
   // Next seconds value is the current seconds value + 1, capped at 3
@@ -256,42 +256,115 @@ function collectCommonAnalyticsData(c: any, queryParams: Record<string, string>,
   return { analyticsData, nextLastModifiedDate };
 }
 
-// Endpoint for tracking pageviews using 1x1 tracking pixel
-app.get("/pixel", async (c) => {
-  const queryParams = c.req.query();
-  
-  const { analyticsData, nextLastModifiedDate } = collectCommonAnalyticsData(c, queryParams);
-
-  // Send to analytics pipeline
-  await c.env.ANALYTICS_PIPELINE.send([analyticsData]);
-  
-  // Create 1x1 transparent GIF for tracking pixel
-  const gif = "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
-  const gifData = atob(gif);
-  const gifLength = gifData.length;
-  const arrayBuffer = new ArrayBuffer(gifLength);
-  const uintArray = new Uint8Array(arrayBuffer);
-  for (let i = 0; i < gifLength; i++) {
-    uintArray[i] = gifData.charCodeAt(i);
+// Endpoint for batch event processing
+app.post("/batch", async (c) => {
+  // Parse the batch data
+  let batchData;
+  try {
+    batchData = await c.req.json();
+  } catch (e) {
+    return c.json({ error: "Invalid JSON payload" }, 400);
   }
 
-  const headers: HeadersInit = {
-    "Access-Control-Allow-Origin": "*",
-    "Content-Type": "image/gif",
-    "Expires": "Mon, 01 Jan 1990 00:00:00 GMT",
-    "Cache-Control": "no-cache",
-    "Pragma": "no-cache",
-    "Tk": "N", // not tracking
-  };
-
-  if (nextLastModifiedDate) {
-    headers["Last-Modified"] = nextLastModifiedDate.toUTCString();
+  // Validate required fields
+  if (!batchData.siteId || !Array.isArray(batchData.events) || batchData.events.length === 0) {
+    return c.json({ error: "Missing required fields: siteId and events" }, 400);
   }
 
-  // Return the tracking pixel
-  return new Response(arrayBuffer, {
-    headers,
-    status: 200,
+  const { userAgent } = c.req.header();
+  const ip = c.req.raw.headers.get("CF-Connecting-IP") || "unknown";
+  const { browser, os, device } = extractDeviceInfo(userAgent);
+  
+  // Process each event in the batch
+  const processedEvents = batchData.events.map(event => {
+    // Get common data from commonParams
+    const commonParams = batchData.commonParams || {};
+    
+    // Base analytics data structure
+    const analyticsData = {
+      timestamp: new Date().toISOString(),
+      session_data: {
+        site_id: batchData.siteId,
+        user_id: batchData.userId || commonParams.user_id || `user${Math.floor(Math.random() * 1000)}`,
+        session_id: batchData.sessionId || commonParams.session_id,
+        client_timestamp: batchData.timestamp || Date.now().toString(),
+      },
+      device_info: {
+        browser,
+        os,
+        device,
+        userAgent,
+        screen: parseScreenDimensions(commonParams.r || ''),
+        viewport: parseScreenDimensions(commonParams.re || ''),
+      },
+      referrer: commonParams.ref || "NA",
+      ip,
+    };
+    
+    // Add event-specific data based on type
+    if (event.type === 'pageview') {
+      return {
+        ...analyticsData,
+        event_data: {
+          event_type: 'pageview',
+          content_type: event.contentType || 'page',
+          virtual_pageview: event.virtualPageview || false,
+        },
+        page: {
+          path: event.path || commonParams.p || '',
+          title: event.title || commonParams.title || '',
+          language: event.language || commonParams.lng || '',
+        },
+        data_type: 'pageview',
+      };
+    }
+    if (event.type === 'event') {
+      return {
+        ...analyticsData,
+        event_data: {
+          event_type: 'custom',
+          event_name: event.eventName,
+          event_category: event.eventCategory || 'interaction',
+          event_label: event.eventLabel || '',
+          event_value: event.eventValue || 0,
+          non_interaction: event.nonInteraction || false,
+        },
+        properties: event.properties || {},
+        data_type: 'event',
+      };
+    }
+    
+    // Default fallback structure
+    return {
+      ...analyticsData,
+      event_data: {
+        event_type: 'unknown',
+      },
+      raw_event: event,
+      data_type: 'unknown',
+    };
+  });
+
+  // Send all processed events to analytics pipeline
+  await c.env.ANALYTICS_PIPELINE.send(processedEvents);
+
+  // Return success response
+  return c.json({ 
+    success: true, 
+    processed: processedEvents.length 
+  }, 200);
+});
+
+// CORS preflight for the batch endpoint
+app.options("/batch", (c) => {
+  return new Response(null, {
+    status: 204,
+    headers: {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type",
+      "Access-Control-Max-Age": "86400",
+    },
   });
 });
 
